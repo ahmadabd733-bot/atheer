@@ -927,7 +927,7 @@ function mushafCardHTML(){
 
     <div class="mushafbox" id="mushafBox">
       <img class="mushafimg" id="mushafImg" alt="وجه المصحف — الصفحة ${pg}"
-           ${res ? `src="${esc(res.img)}"` : ""}>
+           ${res && res.img ? `src="${esc(res.img)}"` : ""}>
       <div class="fallback">
         <p class="muted">لم يُعثر على صورة الوجه في مجلدات البرنامج، ولا تسمح هذه الصفحة بجلبها من موقع خارجي.</p>
         <a class="btn primary" href="${esc(mushafPageURL(pg))}" target="_blank" rel="noopener">افتحي وجه المصحف — صفحة ${pg}</a>
@@ -938,7 +938,7 @@ function mushafCardHTML(){
 
     <div class="eyebrow" style="margin-bottom:9px">استماع الوجه — بصوت الشيخ محمود خليل الحصري</div>
     <div class="audiorow">
-      <audio id="pageAudio" controls preload="metadata" ${res ? `src="${esc(res.aud)}"` : ""}></audio>
+      <audio id="pageAudio" controls preload="metadata" ${res && res.aud ? `src="${esc(res.aud)}"` : ""}></audio>
       <a class="btn audiolink" href="${esc(audioURL(pg))}" target="_blank" rel="noopener">فتح الملف الصوتي</a>
     </div>
     <div class="audioctl">
@@ -977,14 +977,15 @@ function walkSources(el, list, okEvent, onResolved, onExhausted){
 function wireMedia(){
   const pg = activePage();
   if (!pg) return;
-  if (S.resolved && S.resolved.page === pg){ applyAudioPrefs(); return; }
+  if (!S.resolved || S.resolved.page !== pg) S.resolved = { page: pg };
 
+  // الصورة والصوت يُحلّان مستقلَّين؛ نجاح أحدهما لا يوقف بحث الآخر
   const img = $("#mushafImg");
-  if (img && !img.dataset.wired){
+  if (img && !img.dataset.wired && !S.resolved.img){
     img.dataset.wired = "1";
     walkSources(img, imgCandidates(pg), "load",
       (url, isRemote) => {
-        S.resolved = Object.assign({}, S.resolved, { page:pg, img:url });
+        S.resolved.img = url;
         setMediaSource(isRemote ? "remote" : "local");
       },
       () => {
@@ -994,14 +995,12 @@ function wireMedia(){
   }
 
   const au = $("#pageAudio");
-  if (au && !au.dataset.wired){
+  if (au && !au.dataset.wired && !S.resolved.aud){
     au.dataset.wired = "1";
     walkSources(au, audCandidates(pg), "loadedmetadata",
-      url => {
-        S.resolved = Object.assign({}, S.resolved, { page:pg, aud:url });
-        applyAudioPrefs();
-      });
+      url => { S.resolved.aud = url; applyAudioPrefs(); });
   }
+  applyAudioPrefs();
 }
 
 function portionText(){
