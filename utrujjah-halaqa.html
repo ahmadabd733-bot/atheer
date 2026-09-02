@@ -83,6 +83,8 @@ button,input,select,textarea{font:inherit; color:inherit}
 }
 .sync i{width:7px; height:7px; border-radius:50%; background:var(--ink-3); display:block}
 .sync.on i{background:var(--r-exc)}
+.sync.warn{border-color:var(--r-weak); color:var(--r-weak)}
+.sync.warn i{background:var(--r-weak)}
 
 main{flex:1; padding-block:26px 60px}
 
@@ -658,13 +660,98 @@ function ssGet(k){ try{ return sessionStorage.getItem(k); }catch(e){ return null
 function ssSet(k,v){ try{ sessionStorage.setItem(k,v); }catch(e){} }
 
 /* ============================ المخزن ============================ */
-/* يعمل على قاعدة بيانات مشتركة عند توفرها، وإلا فعلى تخزين الجهاز محليًا. */
+/* ثلاث طبقات بالترتيب:
+   1) قاعدة بيانات claude.ai المشتركة — داخل الرابط المنشور هناك
+   2) Firebase Realtime Database — على أي استضافة أخرى (GitHub Pages)
+   3) تخزين الجهاز محليًا — إن تعذّر الاثنان */
 const LS = "utrujjah.v1";
+const FB_PROJECT = "atheer-aee17";
+const FB_NS = "utrujjah";
+const FB_HOSTS = [
+  `https://${FB_PROJECT}-default-rtdb.firebaseio.com`,
+  `https://${FB_PROJECT}-default-rtdb.europe-west1.firebasedatabase.app`,
+  `https://${FB_PROJECT}-default-rtdb.asia-southeast1.firebasedatabase.app`
+];
+const FB_POLL_MS = 4000;
+
 const Store = {
   db:null, mode:"local", ready:false,
+  fb:null, fbDenied:false, _rev:null, _pollTimer:null,
+  _docWatch:{}, _colWatch:{},
   _local:(()=>{ try{ return JSON.parse(lsGet(LS)||"{}"); }catch(e){ return {}; } })(),
   _subs:{},
   _flush(){ lsSet(LS, JSON.stringify(this._local)); },
+
+  /* ---------- Firebase Realtime Database عبر REST ---------- */
+  fbURL(path){ return this.fb + "/" + FB_NS + (path ? "/" + path : "") + ".json"; },
+
+  async detectFirebase(){
+    const saved = lsGet("utrujjah.fb");
+    const hosts = saved ? [saved].concat(FB_HOSTS.filter(h => h !== saved)) : FB_HOSTS.slice();
+    for (const h of hosts){
+      try{
+        const r = await fetch(h + "/" + FB_NS + "/meta/rev.json", { cache:"no-store" });
+        if (r.status === 401 || r.status === 403){ this.fbDenied = true; continue; }
+        if (!r.ok) continue;
+        await r.json();
+        lsSet("utrujjah.fb", h);
+        return h;
+      }catch(e){ /* الشبكة أو الحجب — نجرّب التالي */ }
+    }
+    return null;
+  },
+
+  async fbWrite(path, data){
+    const res = await fetch(this.fbURL(path), {
+      method: data === null ? "DELETE" : "PUT",
+      headers: { "Content-Type":"application/json" },
+      body: data === null ? undefined : JSON.stringify(data)
+    });
+    if (!res.ok) throw new Error("firebase " + res.status);
+    // ختم تغيير يلتقطه بقية الأجهزة بطلب صغير جدًا
+    fetch(this.fbURL("meta/rev"), {
+      method:"PUT", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(Date.now())
+    }).catch(()=>{});
+  },
+
+  _node(path){
+    return path.split("/").reduce((o,k) => (o && o[k] != null) ? o[k] : null, this._tree || {});
+  },
+
+  /* يوزّع الشجرة كاملة على المشتركين */
+  _emitTree(tree){
+    const t = tree || {};
+    this._tree = t;
+    for (const path in this._docWatch){
+      const val = path.split("/").reduce((o,k) => (o && o[k] != null) ? o[k] : null, t);
+      this._docWatch[path](val);
+    }
+    for (const path in this._colWatch){
+      const node = path.split("/").reduce((o,k) => (o && o[k] != null) ? o[k] : null, t) || {};
+      this._colWatch[path](Object.keys(node).map(id => Object.assign({ __id:id }, node[id])));
+    }
+  },
+
+  async fbRefresh(){
+    const r = await fetch(this.fbURL(""), { cache:"no-store" });
+    if (!r.ok) throw new Error("firebase " + r.status);
+    this._emitTree(await r.json());
+  },
+
+  startPolling(){
+    if (this._pollTimer) return;
+    const tick = async () => {
+      try{
+        const r = await fetch(this.fbURL("meta/rev"), { cache:"no-store" });
+        if (r.ok){
+          const rev = await r.json();
+          if (rev !== this._rev){ this._rev = rev; await this.fbRefresh(); }
+        }
+      }catch(e){ /* انقطاع مؤقت — المحاولة التالية بعد ثوانٍ */ }
+    };
+    tick();
+    this._pollTimer = setInterval(tick, FB_POLL_MS);
+  },
 
   async init(){
     try{
@@ -672,9 +759,26 @@ const Store = {
         this.db = await window.claude.use("db");
       }
     }catch(e){ this.db = null; }
-    this.mode = this.db ? "cloud" : "local";
+
+    if (this.db){
+      this.mode = "cloud";
+    } else {
+      const host = await this.detectFirebase();
+      if (host){
+        this.fb = host; this.mode = "firebase";
+        // قراءة أولى حقيقية قبل تسجيل المشتركين، حتى لا نكتب الافتراضيات فوق بيانات قائمة
+        try{
+          const r = await fetch(this.fbURL(""), { cache:"no-store" });
+          this._tree = (r.ok ? await r.json() : null) || {};
+        }catch(e){ this._tree = {}; }
+        this._rev = (this._tree.meta && this._tree.meta.rev) || null;
+      }
+      else { this.mode = this.fbDenied ? "denied" : "local"; }
+    }
+
     this.ready = true;
     setSyncChip();
+    if (this.mode === "firebase") this.startPolling();
     for (const k in this._subs) this._subs[k]();
   },
 
@@ -686,6 +790,9 @@ const Store = {
         snap => cb(snap.exists ? snap.data() : null),
         () => cb(this._local[key] || null)
       );
+    } else if (this.mode === "firebase"){
+      this._docWatch[path] = cb;
+      cb(this._node(path));                  // من القراءة الأولى الحقيقية
     } else {
       const emit = () => cb(this._local[key] || null);
       this._subs[key] = emit; emit();
@@ -698,6 +805,10 @@ const Store = {
     if (this.db){
       try{ await this.db.doc(path).set(deepClone(data)); }
       catch(e){ console.warn("تعذّر الحفظ في القاعدة المشتركة", e); }
+    } else if (this.mode === "firebase"){
+      if (this._docWatch[path]) this._docWatch[path](deepClone(data));
+      try{ await this.fbWrite(path, deepClone(data)); }
+      catch(e){ console.warn("تعذّر الحفظ في Firebase", e); }
     }
   },
 
@@ -709,6 +820,10 @@ const Store = {
         snap => cb(snap.docs.map(d => Object.assign({__id:d.id}, d.data()))),
         () => cb(Object.values(this._local[key]||{}))
       );
+    } else if (this.mode === "firebase"){
+      this._colWatch[path] = cb;
+      const node = this._node(path) || {};
+      cb(Object.keys(node).map(id => Object.assign({ __id:id }, node[id])));
     } else {
       const emit = () => cb(Object.values(this._local[key]||{}));
       this._subs[key] = emit; emit();
@@ -722,6 +837,10 @@ const Store = {
     if (this.db){
       try{ await this.db.collection(path).doc(id).set(deepClone(data)); }
       catch(e){ console.warn("تعذّر الحفظ في القاعدة المشتركة", e); }
+    } else if (this.mode === "firebase"){
+      if (this._colWatch[path]) this._colWatch[path](Object.values(this._local[key]));
+      try{ await this.fbWrite(path + "/" + id, deepClone(data)); }
+      catch(e){ console.warn("تعذّر الحفظ في Firebase", e); }
     }
   },
   async delFromCol(path, id){
@@ -730,6 +849,9 @@ const Store = {
     if (this._subs[key]) this._subs[key]();
     if (this.db){
       try{ await this.db.collection(path).doc(id).delete(); }catch(e){}
+    } else if (this.mode === "firebase"){
+      if (this._colWatch[path]) this._colWatch[path](Object.values(this._local[key]||{}));
+      try{ await this.fbWrite(path + "/" + id, null); }catch(e){}
     }
   }
 };
@@ -737,8 +859,17 @@ const Store = {
 function setSyncChip(){
   const chip = $("#syncChip"), txt = $("#syncTxt");
   if (!chip) return;
-  if (Store.mode === "cloud"){ chip.classList.add("on"); txt.textContent = "متزامنة"; chip.title = "البيانات مشتركة بين المعلمة والطالبات"; }
-  else { chip.classList.remove("on"); txt.textContent = "وضع محلي"; chip.title = "البيانات محفوظة على هذا الجهاز فقط"; }
+  const states = {
+    cloud:    ["متزامنة", "البيانات مشتركة بين المعلمة والطالبات عبر قاعدة claude.ai", true],
+    firebase: ["متزامنة", "البيانات مشتركة بين المعلمة والطالبات عبر Firebase", true],
+    denied:   ["الوصول مرفوض", "قاعدة البيانات موجودة لكن قواعدها تمنع القراءة والكتابة", false],
+    local:    ["وضع محلي", "البيانات محفوظة على هذا الجهاز فقط", false]
+  };
+  const [label, title, ok] = states[Store.mode] || states.local;
+  chip.classList.toggle("on", ok);
+  chip.classList.toggle("warn", Store.mode === "denied");
+  txt.textContent = label;
+  chip.title = title;
 }
 
 /* ============================ الحالة ============================ */
