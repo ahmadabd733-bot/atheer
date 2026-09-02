@@ -673,8 +673,12 @@ const FB_HOSTS = [
   `https://${FB_PROJECT}-default-rtdb.asia-southeast1.firebasedatabase.app`
 ];
 const FB_POLL_MS = 4000;
-/* مفتاح الويب من إعدادات مشروع Firebase. فارغًا: تعمل القاعدة بلا مصادقة. */
-const FB_API_KEY = "";
+/* مفتاح الويب — يُستعمل فقط إن فُعِّلت مصادقة Firebase لاحقًا */
+const FB_API_KEY = "AIzaSyD1I3X6NyBXqZcnl4IlLtSr-OEaf_6CdA8";
+
+/* رمز الحلقة: سرٌّ لا يُكتب في المستودع. قواعد القاعدة تمنع سرد الحلقات،
+   فلا يصل إلى بيانات الحلقة إلا من يعرف رمزها. */
+let FB_CIRCLE = lsGet("utrujjah.circle") || "";
 
 /* مصادقة Firebase عبر REST — بلا مكتبات خارجية.
    حساب واحد للحلقة تشاركه المعلمة مع طالباتها. */
@@ -750,7 +754,7 @@ const Store = {
   _flush(){ lsSet(LS, JSON.stringify(this._local)); },
 
   /* ---------- Firebase Realtime Database عبر REST ---------- */
-  fbURL(path){ return this.fb + "/" + FB_NS + (path ? "/" + path : "") + ".json"; },
+  fbURL(path){ return this.fb + "/" + FB_NS + "/" + FB_CIRCLE + (path ? "/" + path : "") + ".json"; },
   /* رمز المصادقة يُمرَّر في المسار كما تتطلب واجهة RTDB */
   async fbAuthed(url){
     const t = await FBAuth.token();
@@ -762,7 +766,7 @@ const Store = {
     const hosts = saved ? [saved].concat(FB_HOSTS.filter(h => h !== saved)) : FB_HOSTS.slice();
     for (const h of hosts){
       try{
-        const base = h + "/" + FB_NS + "/meta/rev.json";
+        const base = h + "/" + FB_NS + "/" + FB_CIRCLE + "/meta/rev.json";
         const r = await fetch(await this.fbAuthed(base), { cache:"no-store" });
         if (r.status === 401 || r.status === 403){
           // القاعدة موجودة لكنها تشترط مصادقة
@@ -840,6 +844,9 @@ const Store = {
 
     if (this.db){
       this.mode = "cloud";
+    } else if (!FB_CIRCLE){
+      // بلا رمز حلقة لا مزامنة: نعرض البوابة مرة واحدة ثم نحترم الاختيار
+      this.mode = lsGet("utrujjah.nosync") === "1" ? "local" : "needcircle";
     } else {
       const host = await this.detectFirebase();
       if (host){
@@ -941,13 +948,14 @@ function setSyncChip(){
   const states = {
     cloud:    ["متزامنة", "البيانات مشتركة بين المعلمة والطالبات عبر قاعدة claude.ai", true],
     firebase: ["متزامنة", "البيانات مشتركة بين المعلمة والطالبات عبر Firebase", true],
-    needauth: ["يلزم الدخول", "بيانات الحلقة محمية — سجّلي الدخول بحساب الحلقة", false],
+    needauth:   ["يلزم الدخول", "بيانات الحلقة محمية — سجّلي الدخول بحساب الحلقة", false],
+    needcircle: ["بلا ربط", "أدخلي رمز الحلقة لتتزامن البيانات", false],
     denied:   ["الوصول مرفوض", "قاعدة البيانات موجودة لكن قواعدها تمنع القراءة والكتابة", false],
     local:    ["وضع محلي", "البيانات محفوظة على هذا الجهاز فقط", false]
   };
   const [label, title, ok] = states[Store.mode] || states.local;
   chip.classList.toggle("on", ok);
-  chip.classList.toggle("warn", Store.mode === "denied" || Store.mode === "needauth");
+  chip.classList.toggle("warn", ["denied","needauth","needcircle"].indexOf(Store.mode) !== -1);
   txt.textContent = label;
   chip.title = title;
 }
@@ -1222,6 +1230,25 @@ function portionText(){
 }
 
 /* ============================ صفحة الطالبة ============================ */
+/* بوابة رمز الحلقة — تُدخَل مرة واحدة على كل جهاز */
+function viewCircleCode(){
+  return `<div class="gate">
+    <div class="seal">أ</div>
+    <h2>${esc(S.settings.circleName)}</h2>
+    <p>أدخلي رمز الحلقة لتتزامن بياناتك مع المعلمة وبقية الطالبات. الرمز تعطيكِ إياه المعلمة، ويُطلب مرة واحدة على كل جهاز.</p>
+    <div class="card stack">
+      <div class="field">
+        <label for="circleIn">رمز الحلقة</label>
+        <input type="text" id="circleIn" placeholder="xxxx-xxxx-xxxx-xxxx" autocomplete="off" spellcheck="false"
+               style="font-family:ui-monospace,monospace; letter-spacing:1px; text-align:center">
+      </div>
+      <button class="btn primary" id="circleGo">ربط الحلقة</button>
+      <button class="btn ghost sm" id="circleSkip">متابعة بلا مزامنة — هذا الجهاز فقط</button>
+      <div class="err">${esc(S.fbErr||"")}</div>
+    </div>
+  </div>`;
+}
+
 /* بوابة الحلقة: حساب واحد تشاركه المعلمة مع طالباتها */
 function viewCircleLogin(){
   return `<div class="gate">
@@ -1722,10 +1749,21 @@ function tSettings(){
           <div class="field"><label for="setAbsence">رسالة تظهر للطالبة الغائبة</label><textarea id="setAbsence" style="min-height:80px">${esc(st.absenceMsg||"")}</textarea></div>
           <div class="field"><label for="setMakeup">طريقة التعويض</label><textarea id="setMakeup" style="min-height:110px">${esc(st.makeup||"")}</textarea></div>
           <div class="field"><label for="setPass">رمز دخول صفحة المعلمة</label><input type="text" id="setPass" value="${esc(st.pass||"")}"></div>
-          ${FBAuth.enabled() && FBAuth.signedIn() ? `<div class="row" style="margin-top:4px">
-            <span class="muted" style="font-size:12.5px">حساب الحلقة: ${esc(FBAuth.email||"—")}</span>
-            <button class="btn sm ghost" id="fbLogout" style="margin-inline-start:auto">خروج من حساب الحلقة</button>
-          </div>` : ""}
+          <hr class="rule">
+          <div class="field">
+            <label for="setCircle2">رمز الحلقة — شاركيه مع طالباتك ليتزامن معهنّ</label>
+            <input type="text" id="setCircle2" value="${esc(FB_CIRCLE)}" placeholder="xxxx-xxxx-xxxx-xxxx"
+                   autocomplete="off" spellcheck="false" style="font-family:ui-monospace,monospace; letter-spacing:1px">
+            <div class="muted" style="font-size:12.5px">
+              ${Store.mode === "firebase"
+                ? "المزامنة تعمل: كل ما تسجّلينه يظهر عند الطالبات خلال ثوانٍ."
+                : "غير مربوط الآن — الصقي الرمز واضغطي «ربط»."}
+            </div>
+          </div>
+          <div class="row tight">
+            <button class="btn sm" id="circleSave">ربط الرمز</button>
+            ${FB_CIRCLE ? `<button class="btn sm ghost" id="circleClear">فكّ الربط</button>` : ""}
+          </div>
         </div>
       </section>
     </div>
@@ -1924,7 +1962,8 @@ function render(){
   $("#mkName").textContent = S.settings.circleName || "حلقة الأترجة الافتراضية";
   $("#btnStudent").setAttribute("aria-pressed", S.role==="student");
   $("#btnTeacher").setAttribute("aria-pressed", S.role==="teacher");
-  view.innerHTML = Store.mode === "needauth" ? viewCircleLogin()
+  view.innerHTML = Store.mode === "needcircle" ? viewCircleCode()
+                 : Store.mode === "needauth"   ? viewCircleLogin()
                  : S.role === "student" ? viewStudent() : viewTeacher();
 
   window.scrollTo(0, keepScroll ? scrollY : 0);
@@ -1962,6 +2001,15 @@ document.addEventListener("click", async (e)=>{
     return;
   }
   if (t.id === "switchMe"){ S.me=null; lsDel("utrujjah.me"); render(); return; }
+
+  /* --- ربط رمز الحلقة --- */
+  if (t.id === "circleGo"){
+    const code = ((($("#circleIn")||{}).value)||"").trim().toLowerCase();
+    if (!/^[a-z0-9-]{6,64}$/.test(code)){ S.fbErr = "رمز غير صالح. تحقّقي من نسخه كاملًا."; render(); return; }
+    lsSet("utrujjah.circle", code); lsDel("utrujjah.nosync");
+    location.reload(); return;
+  }
+  if (t.id === "circleSkip"){ lsSet("utrujjah.nosync","1"); location.reload(); return; }
 
   /* --- دخول الحلقة (Firebase) --- */
   if (t.id === "fbLogin"){
@@ -2078,6 +2126,17 @@ document.addEventListener("click", async (e)=>{
   /* --- الإعدادات --- */
   if (t.id === "fbLogout"){
     if (confirm("الخروج من حساب الحلقة على هذا الجهاز؟")){ FBAuth.clear(); location.reload(); }
+    return;
+  }
+  if (t.id === "circleSave"){
+    const code = ((($("#setCircle2")||{}).value)||"").trim().toLowerCase();
+    if (!/^[a-z0-9-]{6,64}$/.test(code)){ alert("رمز غير صالح."); return; }
+    lsSet("utrujjah.circle", code); lsDel("utrujjah.nosync"); location.reload(); return;
+  }
+  if (t.id === "circleClear"){
+    if (confirm("فكّ ربط هذا الجهاز بالحلقة؟ ستتوقف المزامنة عليه.")){
+      lsDel("utrujjah.circle"); lsSet("utrujjah.nosync","1"); location.reload();
+    }
     return;
   }
   if (t.id === "autoPage"){ syncPageHint(true); return; }
