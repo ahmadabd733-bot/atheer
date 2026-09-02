@@ -579,9 +579,13 @@ async function fetchSaadiForPage(pg, onStatus){
   return out;
 }
 
-/* الملفات المرفقة بجانب البرنامج تُجرَّب أولًا، ثم الإنترنت */
-const localImgURL   = p => encodeURI("مصحف كتابي/" + p + ".jpg");
-const localAudioURL = p => encodeURI("مصحف صوتي/Page" + String(p).padStart(3,"0") + ".mp3");
+/* مجلدات الملفات المرفقة — تُجرَّب بالترتيب ثم يأتي الإنترنت أخيرًا */
+const IMG_DIRS = ["write", "mushaf", "مصحف كتابي", "images"];
+const AUD_DIRS = ["audio", "مصحف صوتي", "sound"];
+
+const imgCandidates = p => IMG_DIRS.map(d => encodeURI(d + "/" + p + ".jpg")).concat([mushafImgURL(p)]);
+const audCandidates = p => AUD_DIRS.map(d => encodeURI(d + "/Page" + String(p).padStart(3,"0") + ".mp3")).concat([audioURL(p)]);
+
 const mushafImgURL  = p => "https://www.islamicbook.ws/2/" + p + ".jpg";
 const mushafPageURL = p => "https://www.islamicbook.ws/2/" + p + ".html";
 const audioURL      = p => "https://archive.org/download/" + AUDIO_ID + "/Page" + String(p).padStart(3,"0") + ".mp3";
@@ -752,6 +756,7 @@ const S = {
   today: dayKey(),
   seeded:false,
   mediaSource: null,     // null قيد التحديد · local · remote · none
+  resolved: null,        // {page, img, aud} أول مصدر نجح
   audioLoop: lsGet("utrujjah.loop") === "1",
   audioRate: parseFloat(lsGet("utrujjah.rate")) || 1
 };
@@ -912,6 +917,7 @@ function mushafCardHTML(){
     <div class="empty">اكتبي اسم السورة والوجه في الإعدادات ليظهر وجه المصحف وتلاوته تلقائيًا.</div>
   </section>`;
 
+  const res = (S.resolved && S.resolved.page === pg) ? S.resolved : null;
   return `<section class="card">
     <header>
       <h3>وجه المصحف</h3>
@@ -920,10 +926,10 @@ function mushafCardHTML(){
     </header>
 
     <div class="mushafbox" id="mushafBox">
-      <img class="mushafimg" src="${esc(localImgURL(pg))}" data-remote="${esc(mushafImgURL(pg))}"
-           alt="وجه المصحف — الصفحة ${pg}" onload="mediaOK(this)" onerror="imgFallback(this)">
+      <img class="mushafimg" id="mushafImg" alt="وجه المصحف — الصفحة ${pg}"
+           ${res ? `src="${esc(res.img)}"` : ""}>
       <div class="fallback">
-        <p class="muted">لا تسمح هذه الصفحة بعرض الصورة من موقع خارجي، ولم تُرفَق نسخة محلية.</p>
+        <p class="muted">لم يُعثر على صورة الوجه في مجلدات البرنامج، ولا تسمح هذه الصفحة بجلبها من موقع خارجي.</p>
         <a class="btn primary" href="${esc(mushafPageURL(pg))}" target="_blank" rel="noopener">افتحي وجه المصحف — صفحة ${pg}</a>
       </div>
     </div>
@@ -932,8 +938,7 @@ function mushafCardHTML(){
 
     <div class="eyebrow" style="margin-bottom:9px">استماع الوجه — بصوت الشيخ محمود خليل الحصري</div>
     <div class="audiorow">
-      <audio id="pageAudio" controls preload="metadata" src="${esc(localAudioURL(pg))}"
-             data-remote="${esc(audioURL(pg))}" onerror="audioFallback(this)"></audio>
+      <audio id="pageAudio" controls preload="metadata" ${res ? `src="${esc(res.aud)}"` : ""}></audio>
       <a class="btn audiolink" href="${esc(audioURL(pg))}" target="_blank" rel="noopener">فتح الملف الصوتي</a>
     </div>
     <div class="audioctl">
@@ -948,26 +953,54 @@ function mushafCardHTML(){
 }
 /* فشل تحميل صورة الوجه = المصادر الخارجية محجوبة في هذا السياق،
    فنخفي مشغّل الصوت المعطّل ونكتفي بالرابط. */
-/* تسلسل المصادر: الملفات المرفقة ← الإنترنت ← زر يفتحها في تبويب */
+/* تسلسل المصادر: مجلدات البرنامج بالترتيب ← الإنترنت ← زر يفتحها في تبويب */
 function setMediaSource(src){
   if (S.mediaSource === src) return;
   S.mediaSource = src;
   document.documentElement.classList.toggle("no-remote", src === "none");
   render();
 }
-function mediaOK(el){ setMediaSource(el.dataset.tried ? "remote" : "local"); }
-function imgFallback(el){
-  if (!el.dataset.tried && el.dataset.remote){
-    el.dataset.tried = "1"; el.src = el.dataset.remote; return;
-  }
-  const box = document.getElementById("mushafBox");
-  if (box) box.classList.add("failed");
-  setMediaSource("none");
+
+/* يجرّب العناوين واحدًا بعد الآخر ويثبت على أول ما ينجح */
+function walkSources(el, list, okEvent, onResolved, onExhausted){
+  let i = 0;
+  const next = () => {
+    if (i >= list.length){ if (onExhausted) onExhausted(); return; }
+    el.src = list[i];
+    if (el.tagName === "AUDIO"){ try{ el.load(); }catch(e){} }
+  };
+  el.addEventListener("error", () => { i++; next(); });
+  el.addEventListener(okEvent, () => { onResolved(list[i], i === list.length - 1); }, { once:false });
+  next();
 }
-function audioFallback(el){
-  if (!el.dataset.tried && el.dataset.remote){
-    el.dataset.tried = "1"; el.src = el.dataset.remote;
-    try{ el.load(); }catch(e){}
+
+function wireMedia(){
+  const pg = activePage();
+  if (!pg) return;
+  if (S.resolved && S.resolved.page === pg){ applyAudioPrefs(); return; }
+
+  const img = $("#mushafImg");
+  if (img && !img.dataset.wired){
+    img.dataset.wired = "1";
+    walkSources(img, imgCandidates(pg), "load",
+      (url, isRemote) => {
+        S.resolved = Object.assign({}, S.resolved, { page:pg, img:url });
+        setMediaSource(isRemote ? "remote" : "local");
+      },
+      () => {
+        const box = $("#mushafBox"); if (box) box.classList.add("failed");
+        setMediaSource("none");
+      });
+  }
+
+  const au = $("#pageAudio");
+  if (au && !au.dataset.wired){
+    au.dataset.wired = "1";
+    walkSources(au, audCandidates(pg), "loadedmetadata",
+      url => {
+        S.resolved = Object.assign({}, S.resolved, { page:pg, aud:url });
+        applyAudioPrefs();
+      });
   }
 }
 
@@ -1281,19 +1314,19 @@ function facesEditor(s){
 }
 
 function modeBannerHTML(){
+  const where = S.resolved && S.resolved.img ? decodeURI(S.resolved.img).split("/")[0] : "";
   if (S.mediaSource === "local")
-    return `<div class="mode ok"><span class="badge">ملفات الحلقة على الجهاز</span>
-      <div>وجه المصحف والتلاوة يُقرآن من مجلّدَي <b>مصحف كتابي</b> و<b>مصحف صوتي</b> المرفقين،
+    return `<div class="mode ok"><span class="badge">ملفات الحلقة مرفقة</span>
+      <div>وجه المصحف والتلاوة يُقرآن من مجلّدات البرنامج${where?` (<b>${esc(where)}</b>)`:""}،
         وتفسير السعدي للأنعام والأعراف مضمّن — <b>كل شيء يعمل بلا إنترنت</b>.</div></div>`;
   if (S.mediaSource === "remote")
     return `<div class="mode ok"><span class="badge">وضع الإنترنت</span>
-      <div>لم يُعثر على المجلّدين المرفقين، فيُجلب وجه المصحف والتلاوة من الإنترنت.
+      <div>لم يُعثر على مجلّدات الوجه والصوت بجانب البرنامج، فيُجلبان من الإنترنت.
         جلب <b>تفسير السعدي</b> يعمل لأي سورة في المصحف.</div></div>`;
   if (S.mediaSource === "none")
     return `<div class="mode warn"><span class="badge">وضع محدود</span>
-      <div>هذه النسخة لا تصل إلى المجلّدين المرفقين ولا إلى المواقع الخارجية، فيظهر بدلها زرّان يفتحان
-        <b>وجه المصحف</b> و<b>التلاوة</b> في تبويب جديد. تفسير السعدي مضمّن للأنعام والأعراف ويعمل بلا إنترنت.
-        لتشغيل كل شيء داخل الصفحة، افتحي ملف <b>utrujjah-halaqa.html</b> من مجلّده على جهازك.</div></div>`;
+      <div>لا تصل هذه النسخة إلى مجلّدات الوجه والصوت ولا إلى المواقع الخارجية، فيظهر بدلها زرّان يفتحان
+        <b>وجه المصحف</b> و<b>التلاوة</b> في تبويب جديد. تفسير السعدي مضمّن للأنعام والأعراف ويعمل بلا إنترنت.</div></div>`;
   return `<div class="mode"><span class="badge">…</span><div>جارٍ تحديد مصدر وجه المصحف والتلاوة.</div></div>`;
 }
 
@@ -1667,6 +1700,7 @@ function render(){
     }
   }
   applyAudioPrefs();
+  wireMedia();
   if (S.role === "teacher" && S.tTab === "settings") syncPageHint(false);
   if (S.role === "teacher" && S.tTab === "wheel"){
     drawWheel();
