@@ -673,10 +673,77 @@ const FB_HOSTS = [
   `https://${FB_PROJECT}-default-rtdb.asia-southeast1.firebasedatabase.app`
 ];
 const FB_POLL_MS = 4000;
+/* مفتاح الويب من إعدادات مشروع Firebase. فارغًا: تعمل القاعدة بلا مصادقة. */
+const FB_API_KEY = "";
+
+/* مصادقة Firebase عبر REST — بلا مكتبات خارجية.
+   حساب واحد للحلقة تشاركه المعلمة مع طالباتها. */
+const FBAuth = {
+  idToken:null,
+  refreshToken: lsGet("utrujjah.fbrt") || null,
+  expiresAt: 0,
+  email: lsGet("utrujjah.fbmail") || "",
+
+  enabled(){ return !!FB_API_KEY; },
+  signedIn(){ return !!this.refreshToken; },
+  clear(){
+    this.idToken = null; this.refreshToken = null; this.expiresAt = 0;
+    lsDel("utrujjah.fbrt");
+  },
+  _save(j){
+    this.idToken = j.idToken || j.id_token;
+    this.refreshToken = j.refreshToken || j.refresh_token || this.refreshToken;
+    const secs = parseInt(j.expiresIn || j.expires_in, 10) || 3600;
+    this.expiresAt = Date.now() + secs * 1000 - 60000;   // نجدّده قبل انتهائه بدقيقة
+    if (this.refreshToken) lsSet("utrujjah.fbrt", this.refreshToken);
+  },
+
+  async signIn(email, password){
+    const r = await fetch(
+      "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=" + FB_API_KEY,
+      { method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ email, password, returnSecureToken:true }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error((j.error && j.error.message) || "SIGNIN_FAILED");
+    this._save(j);
+    this.email = email; lsSet("utrujjah.fbmail", email);
+  },
+
+  async refresh(){
+    if (!this.refreshToken) return null;
+    const r = await fetch("https://securetoken.googleapis.com/v1/token?key=" + FB_API_KEY, {
+      method:"POST", headers:{ "Content-Type":"application/x-www-form-urlencoded" },
+      body: "grant_type=refresh_token&refresh_token=" + encodeURIComponent(this.refreshToken)
+    });
+    const j = await r.json();
+    if (!r.ok){ this.clear(); return null; }
+    this._save(j);
+    return this.idToken;
+  },
+
+  async token(){
+    if (!this.enabled()) return null;
+    if (this.idToken && Date.now() < this.expiresAt) return this.idToken;
+    return await this.refresh();
+  }
+};
+
+/* رسائل Firebase التقنية بالعربية */
+const FB_ERRORS = {
+  EMAIL_NOT_FOUND: "لا يوجد حساب بهذا البريد.",
+  INVALID_PASSWORD: "كلمة المرور غير صحيحة.",
+  INVALID_LOGIN_CREDENTIALS: "البريد أو كلمة المرور غير صحيحة.",
+  INVALID_EMAIL: "صيغة البريد غير صحيحة.",
+  USER_DISABLED: "هذا الحساب موقوف.",
+  TOO_MANY_ATTEMPTS_TRY_LATER: "محاولات كثيرة — انتظري قليلًا ثم أعيدي المحاولة.",
+  OPERATION_NOT_ALLOWED: "لم تُفعَّل المصادقة بالبريد وكلمة المرور في المشروع بعد."
+};
+const fbErrorAr = m => FB_ERRORS[String(m||"").split(" ")[0]] || "تعذّر تسجيل الدخول. تحقّقي من الاتصال.";
 
 const Store = {
   db:null, mode:"local", ready:false,
-  fb:null, fbDenied:false, _rev:null, _pollTimer:null,
+  fb:null, fbDenied:false, authRequired:false, fbPending:null,
+  _rev:null, _pollTimer:null, _tree:{},
   _docWatch:{}, _colWatch:{},
   _local:(()=>{ try{ return JSON.parse(lsGet(LS)||"{}"); }catch(e){ return {}; } })(),
   _subs:{},
@@ -684,14 +751,25 @@ const Store = {
 
   /* ---------- Firebase Realtime Database عبر REST ---------- */
   fbURL(path){ return this.fb + "/" + FB_NS + (path ? "/" + path : "") + ".json"; },
+  /* رمز المصادقة يُمرَّر في المسار كما تتطلب واجهة RTDB */
+  async fbAuthed(url){
+    const t = await FBAuth.token();
+    return t ? url + (url.indexOf("?") === -1 ? "?" : "&") + "auth=" + encodeURIComponent(t) : url;
+  },
 
   async detectFirebase(){
     const saved = lsGet("utrujjah.fb");
     const hosts = saved ? [saved].concat(FB_HOSTS.filter(h => h !== saved)) : FB_HOSTS.slice();
     for (const h of hosts){
       try{
-        const r = await fetch(h + "/" + FB_NS + "/meta/rev.json", { cache:"no-store" });
-        if (r.status === 401 || r.status === 403){ this.fbDenied = true; continue; }
+        const base = h + "/" + FB_NS + "/meta/rev.json";
+        const r = await fetch(await this.fbAuthed(base), { cache:"no-store" });
+        if (r.status === 401 || r.status === 403){
+          // القاعدة موجودة لكنها تشترط مصادقة
+          this.fbDenied = true; this.authRequired = true; this.fbPending = h;
+          lsSet("utrujjah.fb", h);
+          continue;
+        }
         if (!r.ok) continue;
         await r.json();
         lsSet("utrujjah.fb", h);
@@ -702,16 +780,16 @@ const Store = {
   },
 
   async fbWrite(path, data){
-    const res = await fetch(this.fbURL(path), {
+    const res = await fetch(await this.fbAuthed(this.fbURL(path)), {
       method: data === null ? "DELETE" : "PUT",
       headers: { "Content-Type":"application/json" },
       body: data === null ? undefined : JSON.stringify(data)
     });
     if (!res.ok) throw new Error("firebase " + res.status);
     // ختم تغيير يلتقطه بقية الأجهزة بطلب صغير جدًا
-    fetch(this.fbURL("meta/rev"), {
-      method:"PUT", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(Date.now())
-    }).catch(()=>{});
+    this.fbAuthed(this.fbURL("meta/rev")).then(u =>
+      fetch(u, { method:"PUT", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(Date.now()) })
+    ).catch(()=>{});
   },
 
   _node(path){
@@ -733,7 +811,7 @@ const Store = {
   },
 
   async fbRefresh(){
-    const r = await fetch(this.fbURL(""), { cache:"no-store" });
+    const r = await fetch(await this.fbAuthed(this.fbURL("")), { cache:"no-store" });
     if (!r.ok) throw new Error("firebase " + r.status);
     this._emitTree(await r.json());
   },
@@ -742,7 +820,7 @@ const Store = {
     if (this._pollTimer) return;
     const tick = async () => {
       try{
-        const r = await fetch(this.fbURL("meta/rev"), { cache:"no-store" });
+        const r = await fetch(await this.fbAuthed(this.fbURL("meta/rev")), { cache:"no-store" });
         if (r.ok){
           const rev = await r.json();
           if (rev !== this._rev){ this._rev = rev; await this.fbRefresh(); }
@@ -768,11 +846,12 @@ const Store = {
         this.fb = host; this.mode = "firebase";
         // قراءة أولى حقيقية قبل تسجيل المشتركين، حتى لا نكتب الافتراضيات فوق بيانات قائمة
         try{
-          const r = await fetch(this.fbURL(""), { cache:"no-store" });
+          const r = await fetch(await this.fbAuthed(this.fbURL("")), { cache:"no-store" });
           this._tree = (r.ok ? await r.json() : null) || {};
         }catch(e){ this._tree = {}; }
         this._rev = (this._tree.meta && this._tree.meta.rev) || null;
       }
+      else if (this.authRequired && FBAuth.enabled()){ this.mode = "needauth"; }
       else { this.mode = this.fbDenied ? "denied" : "local"; }
     }
 
@@ -862,12 +941,13 @@ function setSyncChip(){
   const states = {
     cloud:    ["متزامنة", "البيانات مشتركة بين المعلمة والطالبات عبر قاعدة claude.ai", true],
     firebase: ["متزامنة", "البيانات مشتركة بين المعلمة والطالبات عبر Firebase", true],
+    needauth: ["يلزم الدخول", "بيانات الحلقة محمية — سجّلي الدخول بحساب الحلقة", false],
     denied:   ["الوصول مرفوض", "قاعدة البيانات موجودة لكن قواعدها تمنع القراءة والكتابة", false],
     local:    ["وضع محلي", "البيانات محفوظة على هذا الجهاز فقط", false]
   };
   const [label, title, ok] = states[Store.mode] || states.local;
   chip.classList.toggle("on", ok);
-  chip.classList.toggle("warn", Store.mode === "denied");
+  chip.classList.toggle("warn", Store.mode === "denied" || Store.mode === "needauth");
   txt.textContent = label;
   chip.title = title;
 }
@@ -877,7 +957,7 @@ const S = {
   role: lsGet("utrujjah.role") || "student",
   me:   lsGet("utrujjah.me")   || null,
   teacherOK: ssGet("utrujjah.t") === "1",
-  passErr:"",
+  passErr:"", fbErr:"",
   settings: deepClone(DEFAULT_SETTINGS),
   roster: deepClone(DEFAULT_ROSTER),
   days: {},            // "YYYY-MM-DD" -> {records:{sid:{...}}}
@@ -1142,6 +1222,27 @@ function portionText(){
 }
 
 /* ============================ صفحة الطالبة ============================ */
+/* بوابة الحلقة: حساب واحد تشاركه المعلمة مع طالباتها */
+function viewCircleLogin(){
+  return `<div class="gate">
+    <div class="seal">أ</div>
+    <h2>${esc(S.settings.circleName)}</h2>
+    <p>بيانات الحلقة محمية. أدخلي بريد الحلقة وكلمة المرور التي زوّدتك بها المعلمة.</p>
+    <div class="card stack">
+      <div class="field">
+        <label for="fbEmail">بريد الحلقة</label>
+        <input type="text" id="fbEmail" inputmode="email" autocomplete="username" value="${esc(FBAuth.email||"")}">
+      </div>
+      <div class="field">
+        <label for="fbPass">كلمة المرور</label>
+        <input type="password" id="fbPass" autocomplete="current-password">
+      </div>
+      <button class="btn primary" id="fbLogin">دخول</button>
+      <div class="err">${esc(S.fbErr||"")}</div>
+    </div>
+  </div>`;
+}
+
 function viewStudentPicker(){
   const opts = (S.roster.students||[]).map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
   return `<div class="gate">
@@ -1621,6 +1722,10 @@ function tSettings(){
           <div class="field"><label for="setAbsence">رسالة تظهر للطالبة الغائبة</label><textarea id="setAbsence" style="min-height:80px">${esc(st.absenceMsg||"")}</textarea></div>
           <div class="field"><label for="setMakeup">طريقة التعويض</label><textarea id="setMakeup" style="min-height:110px">${esc(st.makeup||"")}</textarea></div>
           <div class="field"><label for="setPass">رمز دخول صفحة المعلمة</label><input type="text" id="setPass" value="${esc(st.pass||"")}"></div>
+          ${FBAuth.enabled() && FBAuth.signedIn() ? `<div class="row" style="margin-top:4px">
+            <span class="muted" style="font-size:12.5px">حساب الحلقة: ${esc(FBAuth.email||"—")}</span>
+            <button class="btn sm ghost" id="fbLogout" style="margin-inline-start:auto">خروج من حساب الحلقة</button>
+          </div>` : ""}
         </div>
       </section>
     </div>
@@ -1819,7 +1924,8 @@ function render(){
   $("#mkName").textContent = S.settings.circleName || "حلقة الأترجة الافتراضية";
   $("#btnStudent").setAttribute("aria-pressed", S.role==="student");
   $("#btnTeacher").setAttribute("aria-pressed", S.role==="teacher");
-  view.innerHTML = S.role === "student" ? viewStudent() : viewTeacher();
+  view.innerHTML = Store.mode === "needauth" ? viewCircleLogin()
+                 : S.role === "student" ? viewStudent() : viewTeacher();
 
   window.scrollTo(0, keepScroll ? scrollY : 0);
   if (memo){
@@ -1856,6 +1962,22 @@ document.addEventListener("click", async (e)=>{
     return;
   }
   if (t.id === "switchMe"){ S.me=null; lsDel("utrujjah.me"); render(); return; }
+
+  /* --- دخول الحلقة (Firebase) --- */
+  if (t.id === "fbLogin"){
+    const em = (($("#fbEmail")||{}).value||"").trim();
+    const pw = ($("#fbPass")||{}).value||"";
+    if (!em || !pw){ S.fbErr = "أدخلي البريد وكلمة المرور."; render(); return; }
+    t.disabled = true; S.fbErr = "جارٍ التحقق…"; render();
+    try{
+      await FBAuth.signIn(em, pw);
+      location.reload();
+    }catch(err){
+      S.fbErr = fbErrorAr(err.message);
+      render();
+    }
+    return;
+  }
 
   /* --- رمز المعلمة --- */
   if (t.id === "passGo"){
@@ -1954,6 +2076,10 @@ document.addEventListener("click", async (e)=>{
   if (t.dataset.delben){ await Store.delFromCol("benefits", t.dataset.delben); return; }
 
   /* --- الإعدادات --- */
+  if (t.id === "fbLogout"){
+    if (confirm("الخروج من حساب الحلقة على هذا الجهاز؟")){ FBAuth.clear(); location.reload(); }
+    return;
+  }
   if (t.id === "autoPage"){ syncPageHint(true); return; }
 
   if (t.id === "fetchSaadi"){
@@ -2093,6 +2219,8 @@ document.addEventListener("keydown", async (e)=>{
     await saveRoster(); return;
   }
   if (el.id === "newStudent"){ e.preventDefault(); const b = $("#addStudent"); if (b) b.click(); }
+  if (el.id === "fbEmail" || el.id === "fbPass"){ e.preventDefault(); const b = $("#fbLogin"); if (b) b.click(); }
+  if (el.id === "passIn"){ e.preventDefault(); const b = $("#passGo"); if (b) b.click(); }
 });
 
 /* ============================ الإقلاع ============================ */
