@@ -1,0 +1,10 @@
+{
+  "rules": {
+    "utrujjah": {
+      "$circle": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    }
+  }
+}
