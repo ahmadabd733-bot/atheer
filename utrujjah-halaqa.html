@@ -614,7 +614,7 @@ const DEFAULT_SETTINGS = {
     {name:"تلاوة النصاب الجديد", min:20},
     {name:"تفسير الجديد", min:20}
   ],
-  pass:"1234"
+  pass:"489561"
 };
 const DEFAULT_ROSTER = { students:[
   {id:"s1", name:"أسماء", weak:[], strong:[]},
@@ -2189,7 +2189,7 @@ document.addEventListener("click", async (e)=>{
       ghareeb:    gh,
       absenceMsg: ($("#setAbsence")||{}).value || "",
       makeup:     ($("#setMakeup")||{}).value || "",
-      pass:       (($("#setPass")||{}).value||"").trim() || "1234",
+      pass:       (($("#setPass")||{}).value||"").trim() || "489561",
       segments
     });
     const m = $("#saveMsg"); if (m){ m.textContent = "حُفظت الإعدادات ✓"; setTimeout(()=>{ if($("#saveMsg")) $("#saveMsg").textContent=""; }, 2500); }
