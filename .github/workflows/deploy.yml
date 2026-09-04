@@ -1,0 +1,37 @@
+name: نشر إلى Firebase
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # يتخطّى النشر بهدوء ما لم يُضبط سرّ حساب الخدمة
+      - name: تهيئة اعتماد حساب الخدمة
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$SA" ]; then
+            echo "::warning::سرّ FIREBASE_SERVICE_ACCOUNT غير مضبوط — تخطّي النشر"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+          else
+            printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+          fi
+
+      - name: نشر الموقع والقواعد
+        if: env.SKIP != 'true'
+        run: >
+          npx --yes firebase-tools@13 deploy
+          --only hosting,database
+          --project atheer-aee17
+          --non-interactive
