@@ -678,7 +678,9 @@ const FB_API_KEY = "AIzaSyD1I3X6NyBXqZcnl4IlLtSr-OEaf_6CdA8";
 
 /* رمز الحلقة: سرٌّ لا يُكتب في المستودع. قواعد القاعدة تمنع سرد الحلقات،
    فلا يصل إلى بيانات الحلقة إلا من يعرف رمزها. */
-let FB_CIRCLE = lsGet("utrujjah.circle") || "";
+let FB_CIRCLE = lsGet("utrujjah.circle") || "vevn-rfkf-ux4e-xx4t";
+/* بريد حساب الحلقة ثابت — الطالبة تُدخل كلمة المرور وحدها */
+const FB_CIRCLE_EMAIL = "halaqa@atheer-aee17.firebaseapp.com";
 
 /* مصادقة Firebase عبر REST — بلا مكتبات خارجية.
    حساب واحد للحلقة تشاركه المعلمة مع طالباتها. */
@@ -1254,12 +1256,8 @@ function viewCircleLogin(){
   return `<div class="gate">
     <div class="seal">أ</div>
     <h2>${esc(S.settings.circleName)}</h2>
-    <p>بيانات الحلقة محمية. أدخلي بريد الحلقة وكلمة المرور التي زوّدتك بها المعلمة.</p>
+    <p>بيانات الحلقة محمية. أدخلي كلمة مرور الحلقة التي زوّدتك بها المعلمة. تُطلب مرة واحدة على كل جهاز.</p>
     <div class="card stack">
-      <div class="field">
-        <label for="fbEmail">بريد الحلقة</label>
-        <input type="text" id="fbEmail" inputmode="email" autocomplete="username" value="${esc(FBAuth.email||"")}">
-      </div>
       <div class="field">
         <label for="fbPass">كلمة المرور</label>
         <input type="password" id="fbPass" autocomplete="current-password">
@@ -2013,9 +2011,9 @@ document.addEventListener("click", async (e)=>{
 
   /* --- دخول الحلقة (Firebase) --- */
   if (t.id === "fbLogin"){
-    const em = (($("#fbEmail")||{}).value||"").trim();
+    const em = FB_CIRCLE_EMAIL;
     const pw = ($("#fbPass")||{}).value||"";
-    if (!em || !pw){ S.fbErr = "أدخلي البريد وكلمة المرور."; render(); return; }
+    if (!pw){ S.fbErr = "أدخلي كلمة المرور."; render(); return; }
     t.disabled = true; S.fbErr = "جارٍ التحقق…"; render();
     try{
       await FBAuth.signIn(em, pw);
@@ -2278,7 +2276,7 @@ document.addEventListener("keydown", async (e)=>{
     await saveRoster(); return;
   }
   if (el.id === "newStudent"){ e.preventDefault(); const b = $("#addStudent"); if (b) b.click(); }
-  if (el.id === "fbEmail" || el.id === "fbPass"){ e.preventDefault(); const b = $("#fbLogin"); if (b) b.click(); }
+  if (el.id === "fbPass"){ e.preventDefault(); const b = $("#fbLogin"); if (b) b.click(); }
   if (el.id === "passIn"){ e.preventDefault(); const b = $("#passGo"); if (b) b.click(); }
 });
 
