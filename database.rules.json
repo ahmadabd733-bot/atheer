@@ -3,7 +3,33 @@
     "utrujjah": {
       "$circle": {
         ".read": "auth != null",
-        ".write": "auth != null"
+
+        "meta": {
+          ".write": "auth != null"
+        },
+
+        "halaqa": {
+          ".write": "auth != null && auth.token.email === 'teacher@atheer-aee17.firebaseapp.com'"
+        },
+
+        "days": {
+          "$date": {
+            ".write": "auth != null && auth.token.email === 'teacher@atheer-aee17.firebaseapp.com'",
+            "records": {
+              "$student": {
+                "tasks": {
+                  ".write": "auth != null"
+                }
+              }
+            }
+          }
+        },
+
+        "benefits": {
+          "$benefit": {
+            ".write": "auth != null && (auth.token.email === 'teacher@atheer-aee17.firebaseapp.com' || !newData.exists() || newData.child('status').val() === 'pending')"
+          }
+        }
       }
     }
   }
